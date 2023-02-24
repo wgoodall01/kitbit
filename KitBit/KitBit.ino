@@ -1,31 +1,36 @@
+#include <Adafruit_SleepyDog.h>
 #include <ArduinoBLE.h>
 #include <Arduino_LSM6DSOX.h>
 #include <Scheduler.h>
 #include <WiFiNINA.h>
 
+#include "bluetooth_uuids.h"
+
+#define WATCHDOG_TIMEOUT 2000
+
+#define WITHIN_EPSILON(a, b) (fabs((a) - (b)) < 0.001)
+
+typedef struct vec3 {
+    float x;
+    float y;
+    float z;
+} vec3_t;
+
+// Make sure the vec3 is represented packed.
+static_assert(sizeof(vec3_t) == 4 * 3);
+
 // UUID for the KitBit BLE service.
-#define BLE_SERVICE_UUID "615061c9-f304-4a14-8ff8-5014e60d020d"
 BLEService ble_service(BLE_SERVICE_UUID);
 
 // UUID for the KitBit AccelX characteristic.
-#define BLE_ACCEL_X_UUID "2e47d8ad-f98d-46f3-beda-34ceebb3706c"
-BLEFloatCharacteristic ble_accel_x_characteristic(BLE_ACCEL_X_UUID, BLERead | BLENotify);
+BLECharacteristic ble_accel_characteristic(BLE_CHAR_ACCEL_UUID, BLERead | BLENotify,
+                                           sizeof(vec3_t));
+BLECharacteristic ble_gyro_characteristic(BLE_CHAR_GYRO_UUID, BLERead | BLENotify, sizeof(vec3_t));
+BLECharacteristic ble_temp_characteristic(BLE_CHAR_TEMP_UUID, BLERead | BLENotify, sizeof(float));
 
-#define BLE_ACCEL_Y_UUID "86c81537-b535-4fb5-ab6c-5cb3e57533bb"
-BLEFloatCharacteristic ble_accel_y_characteristic(BLE_ACCEL_Y_UUID, BLERead | BLENotify);
-
-#define BLE_ACCEL_Z_UUID "78834ccf-1141-4f54-ab86-30f4db51516f"
-BLEFloatCharacteristic ble_accel_z_characteristic(BLE_ACCEL_Z_UUID, BLERead | BLENotify);
-
-float accel_x;
-float accel_y;
-float accel_z;
-
-float gyro_x;
-float gyro_y;
-float gyro_z;
-
-float temperature;
+vec3_t accel;
+vec3_t gyro;
+float temp;
 
 unsigned long num_readings;
 
@@ -33,14 +38,23 @@ void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH);
 
-    pinMode(LEDR, OUTPUT);
-    pinMode(LEDG, OUTPUT);
-    pinMode(LEDB, OUTPUT);
-
+    /*
     // Wait for serial port availability.
     while (!Serial) {
     }
+    Serial.begin(9600);
     Serial.println("=== KitBit ===");
+    */
+
+    // Set up the watchdog timer.
+#ifdef WATCHDOG_TIMEOUT
+    Watchdog.enable(2000);
+    Serial.println("[+] Watchdog timer set.");
+    Serial.print("    Resetting after ");
+    Serial.print(WATCHDOG_TIMEOUT);
+    Serial.print("ms with no sensor readings.");
+    Serial.println();
+#endif
 
     // Initialize the IMU.
     if (IMU.begin()) {
@@ -64,9 +78,9 @@ void setup() {
         BLE.setDeviceName("KitBit Device");
         BLE.setAdvertisedService(ble_service);
 
-        ble_service.addCharacteristic(ble_accel_x_characteristic);
-        ble_service.addCharacteristic(ble_accel_y_characteristic);
-        ble_service.addCharacteristic(ble_accel_z_characteristic);
+        ble_service.addCharacteristic(ble_accel_characteristic);
+        ble_service.addCharacteristic(ble_gyro_characteristic);
+        ble_service.addCharacteristic(ble_temp_characteristic);
 
         BLE.addService(ble_service);
         BLE.advertise();
@@ -76,99 +90,76 @@ void setup() {
     }
 
     // Start the sensor-polling task.
-    Scheduler.startLoop(poll_sensors);
+    Scheduler.startLoop(handle_ble_connection);
 }
 
 void loop() {
+    poll_sensors();
+}
+
+void handle_ble_connection() {
     static int tick = 0;
     tick++;
 
     // Update BLE devices.
     BLEDevice central = BLE.central();
     if (central) {
-        digitalWrite(LEDB, HIGH);
+        // Serial.print("ble: connected to central mac=");
+        // Serial.print(central.address());
+        // Serial.println();
 
-        Serial.print("ble: connected to central mac=");
-        Serial.print(central.address());
-        Serial.println();
+        // Track the last reading we've sent to the central.
+        unsigned int last_reading_number = 0;
 
-        digitalWrite(LEDB, HIGH);
-
-        float old_accel_x = 0, old_accel_y = 0, old_accel_z = 0;
-        unsigned int num_updates = 0;
         while (central.connected()) {
 
-            if (num_updates != 0) {
-                delay(100);
+            // Don't update characteristics if there is no new data.
+            if (num_readings == last_reading_number) {
+                delay(1);
+                yield();
             }
 
-            if (old_accel_x != accel_x) {
-                ble_accel_x_characteristic.writeValue(accel_x);
-                old_accel_x = accel_x;
-                Serial.println("ble: update accel_x");
-            }
-            if (old_accel_y != accel_y) {
-                ble_accel_y_characteristic.writeValue(accel_y);
-                old_accel_y = accel_y;
-                Serial.println("ble: update accel_y");
-            }
-            if (old_accel_z != accel_z) {
-                ble_accel_z_characteristic.writeValue(accel_z);
-                old_accel_z = accel_z;
-                Serial.println("ble: update accel_z");
-            }
+            // Update sensor characteristics.
+            ble_accel_characteristic.writeValue((void*)&accel, sizeof(vec3_t), false);
+            ble_gyro_characteristic.writeValue((void*)&gyro, sizeof(vec3_t), false);
+            ble_temp_characteristic.writeValue((void*)&temp, sizeof(float), false);
 
-            if (num_updates % 64 == 0) {
-                Serial.print("ble: num_updates=");
-                Serial.print(num_updates);
-                Serial.println();
-            }
-
-            yield();
-            num_updates++;
+            last_reading_number = num_readings;
         }
 
-        Serial.println("ble: disconnected");
-
-        digitalWrite(LEDB, LOW);
+        // Serial.println("ble: disconnected");
     }
 
     yield();
 }
 
 void poll_sensors() {
-    if (IMU.accelerationAvailable()) {
-        float x, y, z;
-        IMU.readAcceleration(x, y, z);
+    bool did_read = false;
 
-        accel_x = x;
-        accel_y = y;
-        accel_z = z;
+    while (IMU.accelerationAvailable()) {
+        IMU.readAcceleration(accel.x, accel.y, accel.z);
+        did_read = true;
     }
 
-    if (IMU.gyroscopeAvailable()) {
-        float x, y, z;
-        IMU.readGyroscope(x, y, z);
-
-        gyro_x = x;
-        gyro_y = y;
-        gyro_z = z;
+    while (IMU.gyroscopeAvailable()) {
+        IMU.readGyroscope(gyro.x, gyro.y, gyro.z);
+        did_read = true;
     }
 
-    if (IMU.temperatureAvailable()) {
-        float temp;
+    while (IMU.temperatureAvailable()) {
         IMU.readTemperatureFloat(temp);
-
-        temperature = temp;
+        did_read = true;
     }
 
-    if (num_readings % 64 == 0) {
-        Serial.print("sensors: taken num_readings=");
-        Serial.print(num_readings);
-        Serial.println();
+    // Reset the watchdog timer.
+    if (did_read) {
+        Watchdog.reset();
+        num_readings++;
     }
 
-    num_readings++;
-    delay(3);
+    // Blink the LED as readings are taken.
+    digitalWrite(LED_BUILTIN, num_readings % 64 < 32 ? HIGH : LOW);
+
+    delay(2);
     yield();
 }

@@ -1,0 +1,16 @@
+[package]
+name = "kitbit-host"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.69"
+btleplug = "0.10.4"
+clap = { version = "4.1.6", features = ["derive"] }
+futures = "0.3.26"
+lazy_static = "1.4.0"
+tokio = { version = "1.25.0", features = ["full"] }
+tokio-stream = "0.1.12"
+uuid = "1.3.0"

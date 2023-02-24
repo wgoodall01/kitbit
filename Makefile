@@ -13,10 +13,10 @@ setup: bin/arduino-cli
 	$(ARDUINO) lib install Arduino_LSM6DSOX@1.1.2
 	$(ARDUINO) lib install ArduinoBLE@1.3.2
 	$(ARDUINO) lib install WiFiNINA@1.8.13
-	$(ARDUINO) lib install TaskScheduler@3.7.0
+	$(ARDUINO) lib install "Adafruit SleepyDog Library@1.6.3"
 
 .PHONY: upload
-upload: env_kitbit_port bin/arduino-cli target/arduino_setup_done target/KitBit.ino.bin
+upload: env_kitbit_port bin/arduino-cli target/KitBit.ino.bin
 	$(ARDUINO) upload --port $(KITBIT_PORT) --input-dir target --fqbn $(FQBN)
 
 # Compile the sketch
