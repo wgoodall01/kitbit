@@ -1,6 +1,6 @@
 .SUFFIXES: # disable builtin make rules
 
-FQBN=arduino:mbed_nano:nanorp2040connect
+FQBN=Seeeduino:mbed:xiaonRF52840Sense
 
 ARDUINO=./bin/arduino-cli
 
@@ -9,10 +9,10 @@ build: target/KitBit.ino.bin
 
 .PHONY: setup
 setup: bin/arduino-cli
-	$(ARDUINO) core install arduino:mbed_nano
-	$(ARDUINO) lib install Arduino_LSM6DSOX@1.1.2
+	$(ARDUINO) core update-index
+	$(ARDUINO) core install Seeeduino:mbed
 	$(ARDUINO) lib install ArduinoBLE@1.3.2
-	$(ARDUINO) lib install WiFiNINA@1.8.13
+	$(ARDUINO) lib install "Seeed Arduino LSM6DS3@2.0.3"
 	$(ARDUINO) lib install "Adafruit SleepyDog Library@1.6.3"
 
 .PHONY: upload

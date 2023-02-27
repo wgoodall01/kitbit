@@ -1,14 +1,14 @@
-#include <Adafruit_SleepyDog.h>
 #include <ArduinoBLE.h>
-#include <Arduino_LSM6DSOX.h>
-#include <Scheduler.h>
-#include <WiFiNINA.h>
+#include <LSM6DS3.h>
+
+#include "watchdog.h"
 
 #include "bluetooth_uuids.h"
 
-#define WATCHDOG_TIMEOUT 2000
+#define WATCHDOG_TIMEOUT 5000
 
-#define WITHIN_EPSILON(a, b) (fabs((a) - (b)) < 0.001)
+// Talk to the device's IMU over I2C.
+LSM6DS3 imu(I2C_MODE, 0x6a);
 
 typedef struct vec3 {
     float x;
@@ -36,35 +36,23 @@ unsigned long num_readings;
 
 void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, HIGH);
+    digitalWrite(LED_BUILTIN, LOW);
 
-    /*
-    // Wait for serial port availability.
-    while (!Serial) {
-    }
     Serial.begin(9600);
     Serial.println("=== KitBit ===");
-    */
 
-    // Set up the watchdog timer.
 #ifdef WATCHDOG_TIMEOUT
-    Watchdog.enable(2000);
+    Watchdog.enable(WATCHDOG_TIMEOUT);
     Serial.println("[+] Watchdog timer set.");
     Serial.print("    Resetting after ");
     Serial.print(WATCHDOG_TIMEOUT);
-    Serial.print("ms with no sensor readings.");
+    Serial.print("ms without activity.");
     Serial.println();
 #endif
 
     // Initialize the IMU.
-    if (IMU.begin()) {
+    if (imu.begin() == 0) {
         Serial.println("[+] IMU initialized.");
-        Serial.print("    Accelerometer Sample rate = ");
-        Serial.print(IMU.accelerationSampleRate());
-        Serial.println(" Hz");
-        Serial.print("    Gyroscope Sample rate = ");
-        Serial.print(IMU.gyroscopeSampleRate());
-        Serial.println(" Hz");
     } else {
         Serial.println("[!] Failed to initialize IMU.");
         while (true) {
@@ -89,77 +77,81 @@ void setup() {
         Serial.println("[!] Failed to initialize Bluetooth LE.");
     }
 
-    // Start the sensor-polling task.
-    Scheduler.startLoop(handle_ble_connection);
+    digitalWrite(LED_BUILTIN, HIGH);
 }
 
 void loop() {
-    poll_sensors();
-}
-
-void handle_ble_connection() {
     static int tick = 0;
+    int millis_at_start_of_tick = millis();
     tick++;
 
     // Update BLE devices.
     BLEDevice central = BLE.central();
     if (central) {
-        // Serial.print("ble: connected to central mac=");
-        // Serial.print(central.address());
-        // Serial.println();
+        digitalWrite(LEDB, HIGH);
 
-        // Track the last reading we've sent to the central.
-        unsigned int last_reading_number = 0;
+        Serial.print("ble: connected to central mac=");
+        Serial.print(central.address());
+        Serial.println();
+
+        int updates = 0;
 
         while (central.connected()) {
+            // Reset the watchdog while a device is connected.
+            Watchdog.reset();
 
-            // Don't update characteristics if there is no new data.
-            if (num_readings == last_reading_number) {
-                delay(1);
-                yield();
-            }
+            // Poll the sensor data and update characteristics.
+            poll_sensors();
 
-            // Update sensor characteristics.
-            ble_accel_characteristic.writeValue((void*)&accel, sizeof(vec3_t), false);
-            ble_gyro_characteristic.writeValue((void*)&gyro, sizeof(vec3_t), false);
-            ble_temp_characteristic.writeValue((void*)&temp, sizeof(float), false);
+            // Pause briefly to allow requests from the central. If we don't do this, the central
+            // will fail to make new subscriptions.
+            delay(1);
 
-            last_reading_number = num_readings;
+            // Blink the LED periodically while we transmit data.
+            digitalWrite(LEDG, millis() % 1000 < 20 ? LOW : HIGH);
         }
 
-        // Serial.println("ble: disconnected");
+        // Turn off the LED.
+        digitalWrite(LEDG, HIGH);
+
+        Serial.println("ble: disconnected");
     }
 
-    yield();
+    // Reset the watchdog between connections
+    Watchdog.reset();
+
+    // Blink the LED
+    digitalWrite(LEDB, LOW);
+    delay(10);
+    digitalWrite(LEDB, HIGH);
+
+    // Delay between Bluetooth connections.
+    int delay_between_connections = 2000;
+    int already_elapsed_this_tick = millis() - millis_at_start_of_tick;
+    delay(delay_between_connections - already_elapsed_this_tick);
+
+    // Reset the watchdog after we wake from sleep
+    Watchdog.reset();
 }
 
 void poll_sensors() {
-    bool did_read = false;
+    // Read accelerometer
+    vec3_t accel = {
+        .x = imu.readFloatAccelX(),
+        .y = imu.readFloatAccelY(),
+        .z = imu.readFloatAccelZ(),
+    };
+    ble_accel_characteristic.writeValue((void*)&accel, sizeof(vec3_t), false);
 
-    while (IMU.accelerationAvailable()) {
-        IMU.readAcceleration(accel.x, accel.y, accel.z);
-        did_read = true;
-    }
+    // Read gyroscope
+    vec3_t gyro = {
+        .x = imu.readFloatGyroX(),
+        .y = imu.readFloatGyroY(),
+        .z = imu.readFloatGyroZ(),
+    };
+    ble_gyro_characteristic.writeValue((void*)&gyro, sizeof(vec3_t), false);
 
-    while (IMU.gyroscopeAvailable()) {
-        IMU.readGyroscope(gyro.x, gyro.y, gyro.z);
-        did_read = true;
-    }
-
-    while (IMU.temperatureAvailable()) {
-        IMU.readTemperatureFloat(temp);
-        did_read = true;
-    }
-
-    // Reset the watchdog timer.
-    if (did_read) {
-        Watchdog.reset();
-        num_readings++;
-    }
-
-    // Blink the LED as readings are taken.
-    digitalWrite(LED_BUILTIN, num_readings % 64 < 32 ? HIGH : LOW);
-
-    delay(2);
-    yield();
+    // Read temperature
+    float temp = imu.readTempC();
+    ble_temp_characteristic.writeValue((void*)&temp, sizeof(float), false);
 }

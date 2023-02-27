@@ -6,6 +6,7 @@ use clap::Parser;
 use lazy_static::lazy_static;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use tokio::time::timeout;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
@@ -14,7 +15,24 @@ const BLUETOOTH_UUID_HEADER: &str = include_str!("../../KitBit/bluetooth_uuids.h
 
 lazy_static! {
     static ref BLE_IDENTIFIERS: BleIdentifiers = parse_header_for_uuids();
+    static ref ACCEL: Characteristic = Characteristic {
+        uuid: BLE_IDENTIFIERS.char_accel_uuid,
+        service_uuid: BLE_IDENTIFIERS.service_uuid,
+        properties: CharPropFlags::NOTIFY | CharPropFlags::READ,
+    };
+    static ref GYRO: Characteristic = Characteristic {
+        uuid: BLE_IDENTIFIERS.char_gyro_uuid,
+        service_uuid: BLE_IDENTIFIERS.service_uuid,
+        properties: CharPropFlags::NOTIFY | CharPropFlags::READ,
+    };
+    static ref TEMP: Characteristic = Characteristic {
+        uuid: BLE_IDENTIFIERS.char_temp_uuid,
+        service_uuid: BLE_IDENTIFIERS.service_uuid,
+        properties: CharPropFlags::NOTIFY | CharPropFlags::READ,
+    };
 }
+
+// Define the characteristics we're interested in
 
 /// KitBit host data collector.
 ///
@@ -76,17 +94,17 @@ async fn main() -> Result<()> {
             .await
             .context("No KitBit service advertisements received")?;
 
+        // Stop scanning once we've found our device.
+        central
+            .stop_scan()
+            .await
+            .context("Failed to stop scanning for devices.")?;
+
         // Get the peripheral for the KitBit.
         let kitbit = central
             .peripheral(&kitbit_id)
             .await
             .context("No peripheral found with the ID advertised")?;
-
-        println!("[+] Connecting to KitBit, id={kitbit_id}");
-        kitbit
-            .connect()
-            .await
-            .context("Failed to connect to KitBit")?;
 
         match log_data_from_kitbit(kitbit).await {
             Ok(_) => break Ok(()),
@@ -96,46 +114,101 @@ async fn main() -> Result<()> {
 }
 
 async fn log_data_from_kitbit(kitbit: Peripheral) -> Result<()> {
-    // Define the characteristics we're interested in
-    let accel_characteristic = Characteristic {
-        uuid: BLE_IDENTIFIERS.char_accel_uuid,
-        service_uuid: BLE_IDENTIFIERS.service_uuid,
-        properties: CharPropFlags::NOTIFY | CharPropFlags::READ,
-    };
-    let gyro_characteristic = Characteristic {
-        uuid: BLE_IDENTIFIERS.char_gyro_uuid,
-        service_uuid: BLE_IDENTIFIERS.service_uuid,
-        properties: CharPropFlags::NOTIFY | CharPropFlags::READ,
-    };
-    let temp_characteristic = Characteristic {
-        uuid: BLE_IDENTIFIERS.char_temp_uuid,
-        service_uuid: BLE_IDENTIFIERS.service_uuid,
-        properties: CharPropFlags::NOTIFY | CharPropFlags::READ,
-    };
+    println!("[-] Connecting to KitBit, id={}", kitbit.id());
+    kitbit
+        .connect()
+        .await
+        .context("Failed to connect to KitBit")?;
 
-    println!("[+] Collecting data...");
+    // Subscribe to the characteristics.
+    println!("[-] Subscribing to data updates...");
+    kitbit
+        .subscribe(&ACCEL)
+        .await
+        .context("Failed to subscribe to accelerometer updates")?;
+    println!("    Subscribed to accelerometer updates");
+    kitbit
+        .subscribe(&GYRO)
+        .await
+        .context("Failed to subscribe to gyro updates")?;
+    println!("    Subscribed to gyro updates");
+    kitbit
+        .subscribe(&TEMP)
+        .await
+        .context("Failed to subscribe to temperature updates")?;
+    println!("    Subscribed to temp updates");
+
+    println!("[-] Collecting data...");
+    let mut notifications = kitbit
+        .notifications()
+        .await
+        .context("Failed to get notification stream from KitBit")?;
+
+    let mut last_time = std::time::Instant::now();
+    let mut count_since_last = 0;
+
+    while let Some(notif) = timeout(Duration::from_secs(1), notifications.next())
+        .await
+        .context("Timeout elapsed while waiting for data notification")?
+    {
+        if notif.uuid == ACCEL.uuid {
+            let reading =
+                Vec3::try_from(notif.value.as_slice()).context("Failed to parse acceleration")?;
+            println!("    Accel: {reading}");
+        }
+        if notif.uuid == GYRO.uuid {
+            let reading =
+                Vec3::try_from(notif.value.as_slice()).context("Failed to parse acceleration")?;
+            println!("    Gyro : {reading}");
+        }
+        if notif.uuid == TEMP.uuid {
+            let temp = f32::from_le_bytes(
+                notif
+                    .value
+                    .as_slice()
+                    .try_into()
+                    .context("Invalid temperature")?,
+            );
+            println!("    Temp : {temp}");
+        }
+
+        count_since_last += 1;
+        if count_since_last >= 32 {
+            let avg_time = last_time.elapsed() / count_since_last;
+            eprintln!(
+                "[?] Avg. time per reading: {:.2}ms",
+                avg_time.as_secs_f64() * 1000.0
+            );
+            count_since_last = 0;
+            last_time = std::time::Instant::now();
+        }
+    }
+
     loop {
+        let start_time = std::time::Instant::now();
+
         // Read the three characteristics on a timeout.
         let read_kitbit_fut = async {
             let accel_raw = kitbit
-                .read(&accel_characteristic)
+                .read(&ACCEL)
                 .await
                 .context("Failed to read acceleration characteristic")?;
             let gyro_raw = kitbit
-                .read(&gyro_characteristic)
+                .read(&GYRO)
                 .await
                 .context("Failed to read acceleration characteristic")?;
             let temp_raw = kitbit
-                .read(&temp_characteristic)
+                .read(&TEMP)
                 .await
                 .context("Failed to read temperature characteristic")?;
             anyhow::Ok((accel_raw, gyro_raw, temp_raw))
         };
-        let (accel_raw, gyro_raw, temp_raw) =
-            tokio::time::timeout(Duration::from_millis(500), read_kitbit_fut)
-                .await
-                .context("Timeout elapsed while reading data from KitBit")?
-                .context("Failed to read data from KitBit")?;
+        let (accel_raw, gyro_raw, temp_raw) = timeout(Duration::from_millis(500), read_kitbit_fut)
+            .await
+            .context("Timeout elapsed while reading data from KitBit")?
+            .context("Failed to read data from KitBit")?;
+
+        let time_to_read = start_time.elapsed();
 
         // Parse the data
         let accel = Vec3::try_from(&accel_raw[..]).context("Invalid acceleration")?;
@@ -147,7 +220,10 @@ async fn log_data_from_kitbit(kitbit: Peripheral) -> Result<()> {
                 .context("Invalid temperature")?,
         );
 
-        println!("    accel={accel}  gyro={gyro} temp={temp:.2}");
+        println!(
+            "    accel={accel}  gyro={gyro} temp={temp:.2} in {:.2}ms",
+            time_to_read.as_secs_f64() * 1000.0
+        );
     }
 }
 
