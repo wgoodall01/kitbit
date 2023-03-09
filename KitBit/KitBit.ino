@@ -81,6 +81,9 @@ void setup() {
 }
 
 void loop() {
+    // Reset the watchdog after we wake from sleep
+    Watchdog.reset();
+
     static int tick = 0;
     int millis_at_start_of_tick = millis();
     tick++;
@@ -117,21 +120,20 @@ void loop() {
         Serial.println("ble: disconnected");
     }
 
-    // Reset the watchdog between connections
-    Watchdog.reset();
-
     // Blink the LED
     digitalWrite(LEDB, LOW);
     delay(10);
     digitalWrite(LEDB, HIGH);
 
+    // Reset the watchdog before voluntarily sleeping
+    Watchdog.reset();
+
     // Delay between Bluetooth connections.
     int delay_between_connections = 2000;
     int already_elapsed_this_tick = millis() - millis_at_start_of_tick;
-    delay(delay_between_connections - already_elapsed_this_tick);
-
-    // Reset the watchdog after we wake from sleep
-    Watchdog.reset();
+    if (already_elapsed_this_tick < delay_between_connections) {
+        delay(delay_between_connections - already_elapsed_this_tick);
+    }
 }
 
 void poll_sensors() {
